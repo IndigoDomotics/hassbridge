@@ -162,10 +162,18 @@ class Plugin(indigo.PluginBase):
         self.logger.debug('Starting Concurrent Thread')
         while True:
             if self._started:
-                if not self.mqtt_connected and not self.mqtt_connecting:
-                    self._connect_to_mqtt_broker()
-                self._refresh_ha_info()
-                self._check_timed_updates()
+                try:
+                    if not self.mqtt_connected and not self.mqtt_connecting:
+                        self._connect_to_mqtt_broker()
+                    self._refresh_ha_info()
+                    self._check_timed_updates()
+                except self.StopThread:
+                    raise
+                except Exception:  # pylint: disable=broad-except
+                    # Keep the loop alive: an unhandled error here used to end
+                    # the concurrent thread, stopping reconnects and refreshes.
+                    t, v, tb = sys.exc_info()
+                    self.handle_exception(t, v, tb)
             self.sleep(60)
 
     # pylint: disable=unused-argument
@@ -293,7 +301,7 @@ class Plugin(indigo.PluginBase):
             return
         if was_connected:
             self.logger.debug('Disconnecting from MQTT Broker')
-            for _, ha_device in self._ha_devices.items():
+            for _, ha_device in list(self._ha_devices.items()):
                 if ha_device.indigo_entity is not None \
                         and isinstance(ha_device, RegisterableDevice):
                     ha_device.shutdown()
@@ -337,7 +345,7 @@ class Plugin(indigo.PluginBase):
             raise
 
     def _check_timed_updates(self):
-        for _, ha_device in self._ha_devices.items():
+        for _, ha_device in list(self._ha_devices.items()):
             if isinstance(ha_device, TimedUpdateCheck):
                 ha_device.check_for_update()
 
@@ -377,6 +385,7 @@ class Plugin(indigo.PluginBase):
         self._refresh_ha_info()
 
     def _map_indigo_devices(self,
+                            ha_devices,
                             old_ha_devices,
                             new_device_followers_map,
                             new_address_mapping,
@@ -408,7 +417,7 @@ class Plugin(indigo.PluginBase):
                         new_address_mapping[
                             str(indigo_device.address)].append(ha_device)
 
-                self._ha_devices.update(hass_devices)
+                ha_devices.update(hass_devices)
 
             # Find and remove unused ha devices
             if str(indigo_device.id) not in \
@@ -420,6 +429,7 @@ class Plugin(indigo.PluginBase):
 
     # pylint: disable=unused-argument
     def _map_indigo_variables(self,
+                              ha_devices,
                               old_ha_devices,
                               new_device_followers_map,
                               new_address_mapping,
@@ -443,7 +453,7 @@ class Plugin(indigo.PluginBase):
                         new_device_followers_map[
                             str(indigo_variable.id)].append(ha_device)
 
-                self._ha_devices.update(hass_devices)
+                ha_devices.update(hass_devices)
 
             # Find and remove unused ha devices
             if str(indigo_variable.id) not in \
@@ -455,24 +465,30 @@ class Plugin(indigo.PluginBase):
 
     def _map_indigo_entries(self):
         try:
-            old_ha_devices = self._ha_devices
+            # Build the new mapping off to the side and swap it in at the end so
+            # MQTT callbacks iterating self._ha_devices never see it change size.
+            old_ha_devices = dict(self._ha_devices)
+            ha_devices = {}
             new_device_followers_map = {}
             new_address_mapping = {}
             device_remove_list = []
 
-            self._map_indigo_devices(old_ha_devices,
+            self._map_indigo_devices(ha_devices,
+                                     old_ha_devices,
                                      new_device_followers_map,
                                      new_address_mapping,
                                      device_remove_list)
-            self._map_indigo_variables(old_ha_devices,
+            self._map_indigo_variables(ha_devices,
+                                       old_ha_devices,
                                        new_device_followers_map,
                                        new_address_mapping,
                                        device_remove_list)
 
             # remove the references to old devices
             for remove_device in device_remove_list:
-                old_ha_devices.pop(remove_device)
+                old_ha_devices.pop(remove_device, None)
 
+            self._ha_devices = ha_devices
             self._ha_device_followers = new_device_followers_map
             self._ha_device_address_mapping = new_address_mapping
 
@@ -527,7 +543,7 @@ class Plugin(indigo.PluginBase):
             ha_device.cleanup()
 
     def _register_ha_devices(self):
-        for _, ha_device in self._ha_devices.items():
+        for _, ha_device in list(self._ha_devices.items()):
             self._register_ha_device(ha_device)
 
 
