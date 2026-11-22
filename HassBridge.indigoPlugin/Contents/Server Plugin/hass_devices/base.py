@@ -22,10 +22,9 @@
 
 import json
 import re
+from datetime import timezone
 
 import indigo
-import pytz
-import tzlocal
 from hassbridge import (
     MQTT_UNIQUE_ID_TEMPLATE, RegisterableDevice, TOPIC_ROOT, UpdatableDevice,
     str2bool, get_mqtt_client)
@@ -447,12 +446,12 @@ class BaseStatefulHADevice(BaseStatefulHAEntity, UpdatableDevice):
 
     def _send_attributes(self, dev):
         attributes = {
-            'last_changed': dev.lastChanged.replace(
-                tzinfo=tzlocal.get_localzone()
-            ).astimezone(pytz.utc).strftime('%Y-%m-%dT%H:%M:%S.%f%z'),
-            'last_successful_com': dev.lastSuccessfulComm.replace(
-                tzinfo=tzlocal.get_localzone()
-            ).astimezone(pytz.utc).strftime('%Y-%m-%dT%H:%M:%S.%f%z'),
+            # Indigo returns naive datetimes in local time; astimezone()
+            # interprets them as local time and converts aware values.
+            'last_changed': dev.lastChanged.astimezone(
+                timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f%z'),
+            'last_successful_com': dev.lastSuccessfulComm.astimezone(
+                timezone.utc).strftime('%Y-%m-%dT%H:%M:%S.%f%z'),
             'indigo_id': self.id,
         }
 
