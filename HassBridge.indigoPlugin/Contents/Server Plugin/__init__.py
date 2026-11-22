@@ -62,7 +62,11 @@ class Config(object):
 
         self.hass_access_token = pluginPrefs.get('access_token', '')
         try:
-            jwt.decode(self.hass_access_token, verify=False)
+            # Structural sanity check only; the signature cannot be verified here.
+            # PyJWT 2.x ignores verify=False and requires algorithms, so use
+            # options, which PyJWT 1.x also accepts.
+            jwt.decode(self.hass_access_token,
+                       options={'verify_signature': False})
         except InvalidTokenError:
             self.logger.warn('Access Token does not appear to be valid.')
         self.hass_session_headers = {
