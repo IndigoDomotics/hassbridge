@@ -93,10 +93,9 @@ class Plugin(indigo.PluginBase):
         client = MqttClient.get_instance()
 
         self.mqtt_client = client.client = self._setup_mqtt_client()
-        self.mqtt_client.on_connect = self.on_mqtt_connect
-        self.mqtt_client.on_disconnect = self.on_mqtt_disconnect
-        self.mqtt_client.on_message = self.on_mqtt_message
+        self._configure_mqtt_callbacks()
         self.mqtt_connected = False
+        self.mqtt_connecting = False
 
         self._ha_devices = {}
         self._ha_device_followers = {}
@@ -116,9 +115,15 @@ class Plugin(indigo.PluginBase):
     ####
 
     def _setup_mqtt_client(self):
+        kwargs = {}
+        if hasattr(mqtt, 'CallbackAPIVersion'):
+            # paho-mqtt >= 2.0 requires an explicit callback API version;
+            # the plugin's callbacks use the VERSION1 signatures.
+            kwargs['callback_api_version'] = mqtt.CallbackAPIVersion.VERSION1
         client = mqtt.Client(
             client_id=self.config.mqtt_client_id,
-            transport=self.config.mqtt_protocol)
+            transport=self.config.mqtt_protocol,
+            **kwargs)
         if self.config.mqtt_use_encryption:
             client.tls_set()
             if self.config.mqtt_allow_unvalidated:
@@ -130,6 +135,7 @@ class Plugin(indigo.PluginBase):
         self._disconnect_from_mqtt_broker()
         client = MqttClient.get_instance()
         self.mqtt_client = client.client = self._setup_mqtt_client()
+        self._configure_mqtt_callbacks()
         self._connect_to_mqtt_broker()
         self._setup_ha_devices()
         self._register_ha_devices()
@@ -156,10 +162,18 @@ class Plugin(indigo.PluginBase):
         self.logger.debug('Starting Concurrent Thread')
         while True:
             if self._started:
-                if not self.mqtt_connected:
-                    self._connect_to_mqtt_broker()
-                self._refresh_ha_info()
-                self._check_timed_updates()
+                try:
+                    if not self.mqtt_connected and not self.mqtt_connecting:
+                        self._connect_to_mqtt_broker()
+                    self._refresh_ha_info()
+                    self._check_timed_updates()
+                except self.StopThread:
+                    raise
+                except Exception:  # pylint: disable=broad-except
+                    # Keep the loop alive: an unhandled error here used to end
+                    # the concurrent thread, stopping reconnects and refreshes.
+                    t, v, tb = sys.exc_info()
+                    self.handle_exception(t, v, tb)
             self.sleep(60)
 
     # pylint: disable=unused-argument
@@ -222,19 +236,33 @@ class Plugin(indigo.PluginBase):
     ####
     # MQTT Support
     ####
+    def _configure_mqtt_callbacks(self):
+        self.mqtt_client.on_connect = self.on_mqtt_connect
+        self.mqtt_client.on_disconnect = self.on_mqtt_disconnect
+        self.mqtt_client.on_message = self.on_mqtt_message
+
     def _connect_to_mqtt_broker(self):
         try:
+            if self.mqtt_connected or self.mqtt_connecting:
+                return
             self._disconnect_from_mqtt_broker()
+            self.mqtt_connecting = True
+            # A paho client whose network loop has been stopped is not reliably
+            # reusable, so build a fresh one (with callbacks) for each attempt.
+            client = MqttClient.get_instance()
+            self.mqtt_client = client.client = self._setup_mqtt_client()
+            self._configure_mqtt_callbacks()
             self.logger.info('Connecting to the MQTT Server...')
             self.mqtt_client.username_pw_set(username=self.config.mqtt_username, password=self.config.mqtt_password)
             self.mqtt_client.connect(self.config.mqtt_server, self.config.mqtt_port, 59)
             self.logger.info('Connected to MQTT Server!')
             self.mqtt_client.loop_start()
         except Exception:    # pylint: disable=broad-except
+            self.mqtt_connecting = False
             t, v, tb = sys.exc_info()
-            if v.errno == 61:
+            if getattr(v, 'errno', None) == 61:
                 self.logger.critical('Connection Refused when connecting to broker.')
-            elif v.errno == 60:
+            elif getattr(v, 'errno', None) == 60:
                 self.logger.error('Timeout when connecting to broker.')
             else:
                 self.handle_exception(t, v, tb)
@@ -246,6 +274,7 @@ class Plugin(indigo.PluginBase):
     def on_mqtt_connect(self, client, userdata, flags, rc):
         try:
             self.logger.debug(f'Connected to MQTT server with result code {rc}')
+            self.mqtt_connecting = False
             if rc == 0:
                 self.mqtt_connected = True
                 self._register_ha_devices()
@@ -265,18 +294,30 @@ class Plugin(indigo.PluginBase):
             self.handle_exception(t, v, tb)
 
     def _disconnect_from_mqtt_broker(self):
-        if self.mqtt_connected:
+        was_connected = self.mqtt_connected
+        self.mqtt_connected = False
+        self.mqtt_connecting = False
+        if self.mqtt_client is None:
+            return
+        if was_connected:
             self.logger.debug('Disconnecting from MQTT Broker')
-            for _, ha_device in self._ha_devices.items():
+            for _, ha_device in list(self._ha_devices.items()):
                 if ha_device.indigo_entity is not None \
                         and isinstance(ha_device, RegisterableDevice):
                     ha_device.shutdown()
-            self.mqtt_client.disconnect()
-            self.mqtt_client.loop_stop()
+        # Always stop the old client's network loop, even if the broker
+        # dropped us first, so a stale loop thread does not linger.
+        for stop in (self.mqtt_client.disconnect, self.mqtt_client.loop_stop):
+            try:
+                stop()
+            except Exception:  # pylint: disable=broad-except
+                pass
 
-    def on_mqtt_disconnect(self):
+    # pylint: disable=unused-argument
+    def on_mqtt_disconnect(self, client, userdata, rc):
         self.logger.warn('Disconnected from MQTT Broker.')
         self.mqtt_connected = False
+        self.mqtt_connecting = False
 
     # The callback for when a PUBLISH message is received from the server.
     # pylint: disable=unused-argument
@@ -304,7 +345,7 @@ class Plugin(indigo.PluginBase):
             raise
 
     def _check_timed_updates(self):
-        for _, ha_device in self._ha_devices.items():
+        for _, ha_device in list(self._ha_devices.items()):
             if isinstance(ha_device, TimedUpdateCheck):
                 ha_device.check_for_update()
 
@@ -344,6 +385,7 @@ class Plugin(indigo.PluginBase):
         self._refresh_ha_info()
 
     def _map_indigo_devices(self,
+                            ha_devices,
                             old_ha_devices,
                             new_device_followers_map,
                             new_address_mapping,
@@ -375,7 +417,7 @@ class Plugin(indigo.PluginBase):
                         new_address_mapping[
                             str(indigo_device.address)].append(ha_device)
 
-                self._ha_devices.update(hass_devices)
+                ha_devices.update(hass_devices)
 
             # Find and remove unused ha devices
             if str(indigo_device.id) not in \
@@ -387,6 +429,7 @@ class Plugin(indigo.PluginBase):
 
     # pylint: disable=unused-argument
     def _map_indigo_variables(self,
+                              ha_devices,
                               old_ha_devices,
                               new_device_followers_map,
                               new_address_mapping,
@@ -410,7 +453,7 @@ class Plugin(indigo.PluginBase):
                         new_device_followers_map[
                             str(indigo_variable.id)].append(ha_device)
 
-                self._ha_devices.update(hass_devices)
+                ha_devices.update(hass_devices)
 
             # Find and remove unused ha devices
             if str(indigo_variable.id) not in \
@@ -422,24 +465,30 @@ class Plugin(indigo.PluginBase):
 
     def _map_indigo_entries(self):
         try:
-            old_ha_devices = self._ha_devices
+            # Build the new mapping off to the side and swap it in at the end so
+            # MQTT callbacks iterating self._ha_devices never see it change size.
+            old_ha_devices = dict(self._ha_devices)
+            ha_devices = {}
             new_device_followers_map = {}
             new_address_mapping = {}
             device_remove_list = []
 
-            self._map_indigo_devices(old_ha_devices,
+            self._map_indigo_devices(ha_devices,
+                                     old_ha_devices,
                                      new_device_followers_map,
                                      new_address_mapping,
                                      device_remove_list)
-            self._map_indigo_variables(old_ha_devices,
+            self._map_indigo_variables(ha_devices,
+                                       old_ha_devices,
                                        new_device_followers_map,
                                        new_address_mapping,
                                        device_remove_list)
 
             # remove the references to old devices
             for remove_device in device_remove_list:
-                old_ha_devices.pop(remove_device)
+                old_ha_devices.pop(remove_device, None)
 
+            self._ha_devices = ha_devices
             self._ha_device_followers = new_device_followers_map
             self._ha_device_address_mapping = new_address_mapping
 
@@ -494,7 +543,7 @@ class Plugin(indigo.PluginBase):
             ha_device.cleanup()
 
     def _register_ha_devices(self):
-        for _, ha_device in self._ha_devices.items():
+        for _, ha_device in list(self._ha_devices.items()):
             self._register_ha_device(ha_device)
 
 

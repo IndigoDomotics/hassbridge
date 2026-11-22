@@ -24,7 +24,6 @@ import re
 from datetime import datetime, timedelta
 
 import indigo
-import tzlocal
 from hass_devices import BinarySensor, Cover, Fan, Light, Lock, Sensor, Switch
 from hass_devices.base import Base, BaseCommandableHADevice, BaseHAEntity
 from hassbridge import TOPIC_ROOT, TimedUpdateCheck, get_mqtt_client
@@ -262,11 +261,11 @@ class InsteonBatteryStateSensor(BinarySensor, TimedUpdateCheck):
 
     def check_for_update(self):
         state = False
-        tz = tzlocal.get_localzone()  # local timezone
-        then = tz.normalize(tz.localize(
-            self.indigo_entity.lastSuccessfulComm))  # make it timezone-aware
-        now = datetime.now(
-            tz)  # timezone-aware current time in the local timezone
+        # lastSuccessfulComm is a naive local datetime. astimezone() works with
+        # any tzlocal version; tzlocal >= 3 returns zoneinfo objects, which have
+        # no localize()/normalize().
+        then = self.indigo_entity.lastSuccessfulComm.astimezone()
+        now = datetime.now().astimezone()
         if (now - then) > timedelta(minutes=self.no_comm_minutes):
             state = True
         self._send_battery_state(state)
