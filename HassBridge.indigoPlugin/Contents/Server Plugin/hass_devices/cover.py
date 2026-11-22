@@ -114,8 +114,9 @@ class Cover(BaseCommandableHADevice):
             retain=self.state_topic_retain)
 
     def on_command_message(self, client, userdata, msg):
+        payload = self._decode_payload(msg.payload)
         self.logger.debug(
-            u"Command message {} received on {}".format(msg.payload, msg.topic))
-        if msg.payload in [self.payload_open, self.payload_close,
-                           self.payload_stop]:
+            u"Command message {} received on {}".format(payload, msg.topic))
+        if payload in [self.payload_open, self.payload_close,
+                       self.payload_stop]:
             indigo.iodevice.setBinaryOutput(self.id, index=0, value=True)

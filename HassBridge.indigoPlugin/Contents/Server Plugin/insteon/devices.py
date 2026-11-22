@@ -112,9 +112,10 @@ class InsteonKeypadButtonLight(Switch, InsteonKeypadButtonCommandProcessor):
 
     # pylint: disable=unused-argument
     def on_command_message(self, client, userdata, msg):
+        payload = self._decode_payload(msg.payload)
         self.logger.debug(
-            u'Command message {} received on {}'.format(msg.payload, msg.topic))
-        if msg.payload == self.payload_on \
+            u'Command message {} received on {}'.format(payload, msg.topic))
+        if payload == self.payload_on \
                 and not \
                 indigo.devices[self.parent_id].ledStates[self.button - 1]:
             if self.is_relay:
@@ -125,7 +126,7 @@ class InsteonKeypadButtonLight(Switch, InsteonKeypadButtonCommandProcessor):
                 indigo.dimmer.setLedState(self.parent_id,
                                           index=self.button - 1,
                                           value=True)
-        elif msg.payload == self.payload_off \
+        elif payload == self.payload_off \
                 and indigo.devices[self.parent_id].ledStates[self.button - 1]:
             if self.is_relay:
                 indigo.relay.setLedState(self.parent_id,

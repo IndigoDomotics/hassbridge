@@ -53,6 +53,13 @@ class Base(object):
     def __getitem__(self, key):
         return getattr(self, key)
 
+    @staticmethod
+    def _decode_payload(payload):
+        """paho delivers MQTT payloads as bytes under Python 3."""
+        if isinstance(payload, bytes):
+            return payload.decode('utf-8')
+        return str(payload)
+
     def _overrideable_get(self, key, default, section=CONFIG_VARS_SECTION):
         ret = None
         if default is not None:
